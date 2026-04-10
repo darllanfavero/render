@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: sw-proxy-trafficlens
+    runtime: node
+    plan: free
+    buildCommand: echo "No build needed"
+    startCommand: node server.js
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+    healthCheckPath: /health

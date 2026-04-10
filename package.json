@@ -1,0 +1,12 @@
+{
+  "name": "sw-proxy-render",
+  "version": "1.0.0",
+  "description": "SimilarWeb proxy for Traffic Lens - deployed on Render.com",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
