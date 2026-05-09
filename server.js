@@ -120,7 +120,7 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  // Generic proxy endpoint: /api/proxy?url=https://example.com/path
+  // Generic proxy endpoint: /api/proxy?url=https://example.com/path&geo=BR
   if (url.pathname === '/api/proxy') {
     const target = url.searchParams.get('url');
     if (!target) {
@@ -129,12 +129,31 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    // Reconstruct full URL with ALL original query params preserved
+    const rawQuery = req.url.substring(req.url.indexOf('?') + 1);
+    const rawParams = new URLSearchParams(rawQuery);
+    const allUrlValues = rawParams.getAll('url');
+    const targetFull = allUrlValues.length > 1 ? allUrlValues.join('&url=') : target;
+    // Also try to capture the remaining query string after url= param
+    let targetFinal = targetFull;
+    const urlIdx = rawQuery.indexOf('url=');
+    if (urlIdx >= 0) {
+      const afterUrl = rawQuery.substring(urlIdx + 4);
+      // Find where next known param starts (geo=, country=)
+      const nextParam = afterUrl.search(/[&?](?:geo|country|follow|timeout)=/);
+      if (nextParam >= 0) {
+        targetFinal = decodeURIComponent(afterUrl.substring(0, nextParam));
+      } else {
+        targetFinal = decodeURIComponent(afterUrl);
+      }
+    }
+
     let targetUrl;
     try {
-      targetUrl = new URL(target);
+      targetUrl = new URL(targetFinal);
     } catch (_) {
       res.writeHead(400, CORS_HEADERS);
-      res.end(JSON.stringify({ error: 'Invalid URL' }));
+      res.end(JSON.stringify({ error: 'Invalid URL', got: targetFinal.substring(0, 200) }));
       return;
     }
 
@@ -145,28 +164,55 @@ const server = createServer(async (req, res) => {
       return;
     }
 
+    const spoofGeo = (url.searchParams.get('geo') || url.searchParams.get('country') || '').toUpperCase();
+    const followRedirects = url.searchParams.get('follow') !== '0';
+    const proxyTimeout = parseInt(url.searchParams.get('timeout') || '30') * 1000;
+
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000);
+    const timeout = setTimeout(() => controller.abort(), proxyTimeout);
+
+    // BR geo spoofing IPs (rotating pool)
+    const BR_IPS = [
+      '177.67.80.0',  // Claro Brazil
+      '187.105.93.205', // from user's HAR (serverIPAddress)
+      '191.240.0.0',   // Oi Brazil
+      '189.6.0.0',     // Vivo Brazil
+      '201.17.0.0',    // Vivo Brazil
+    ];
+    const spoofIp = BR_IPS[Math.floor(Math.random() * BR_IPS.length)];
 
     try {
+      const fetchHeaders = {
+        'User-Agent': USER_AGENT,
+        'Accept': '*/*',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'X-Forwarded-For': spoofIp,
+        'X-Real-IP': spoofIp,
+        'CF-Connecting-IP': spoofIp,
+        'True-Client-IP': spoofIp,
+      };
+
+      if (spoofGeo) {
+        fetchHeaders['CF-IPCountry'] = spoofGeo;
+        fetchHeaders['CloudFront-Viewer-Country'] = spoofGeo;
+        fetchHeaders['X-Country-Code'] = spoofGeo;
+      }
+
       const fetchRes = await fetch(targetUrl.href, {
-        headers: {
-          'User-Agent': USER_AGENT,
-          'Accept': '*/*',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Accept-Encoding': 'gzip, deflate, br',
-        },
+        headers: fetchHeaders,
         signal: controller.signal,
-        redirect: 'follow',
+        redirect: followRedirects ? 'follow' : 'manual',
       });
       clearTimeout(timeout);
 
-      // Passthrough response headers (filtered)
       const passthroughHeaders = { ...CORS_HEADERS_PASSTHROUGH };
       const contentType = fetchRes.headers.get('content-type') || 'application/octet-stream';
       passthroughHeaders['Content-Type'] = contentType;
       passthroughHeaders['X-Proxy-Status'] = fetchRes.status;
       passthroughHeaders['X-Proxy-Url'] = fetchRes.url;
+      passthroughHeaders['X-Proxy-Geo'] = spoofGeo || 'none';
+      passthroughHeaders['X-Proxy-IP'] = spoofIp;
       passthroughHeaders['Cache-Control'] = 'public, max-age=60';
 
       if (fetchRes.status >= 300 && fetchRes.status < 400) {
