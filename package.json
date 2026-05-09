@@ -1,7 +1,8 @@
 {
-  "name": "sw-proxy-render",
-  "version": "1.0.0",
-  "description": "SimilarWeb proxy for Traffic Lens - deployed on Render.com",
+  "name": "sw-proxy-trafficlens",
+  "version": "1.0.1",
+  "type": "module",
+  "description": "SimilarWeb + generic HTTP proxy with geo-spoofing",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
