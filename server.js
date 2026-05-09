@@ -1,4 +1,4 @@
-// SimilarWeb Proxy Server for Traffic Lens
+// SimilarWeb Proxy Server for Traffic Lens + Generic HTTP Proxy
 // Deployed on Render.com (Google Cloud infrastructure) to bypass CloudFront IP blocks
 // on Cloudflare/Netlify/AWS IP ranges.
 
@@ -12,6 +12,12 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type',
   'Content-Type': 'application/json',
+};
+
+const CORS_HEADERS_PASSTHROUGH = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'Content-Type',
 };
 
 // Simple in-memory cache (12 hour TTL)
@@ -111,6 +117,78 @@ const server = createServer(async (req, res) => {
 
     res.writeHead(status, { ...CORS_HEADERS, 'X-Cache': 'MISS', 'Cache-Control': 'public, max-age=43200' });
     res.end(body);
+    return;
+  }
+
+  // Generic proxy endpoint: /api/proxy?url=https://example.com/path
+  if (url.pathname === '/api/proxy') {
+    const target = url.searchParams.get('url');
+    if (!target) {
+      res.writeHead(400, CORS_HEADERS);
+      res.end(JSON.stringify({ error: 'Missing ?url= param' }));
+      return;
+    }
+
+    let targetUrl;
+    try {
+      targetUrl = new URL(target);
+    } catch (_) {
+      res.writeHead(400, CORS_HEADERS);
+      res.end(JSON.stringify({ error: 'Invalid URL' }));
+      return;
+    }
+
+    // Only allow HTTP/HTTPS
+    if (targetUrl.protocol !== 'http:' && targetUrl.protocol !== 'https:') {
+      res.writeHead(400, CORS_HEADERS);
+      res.end(JSON.stringify({ error: 'Only http/https URLs are allowed' }));
+      return;
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+
+    try {
+      const fetchRes = await fetch(targetUrl.href, {
+        headers: {
+          'User-Agent': USER_AGENT,
+          'Accept': '*/*',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Accept-Encoding': 'gzip, deflate, br',
+        },
+        signal: controller.signal,
+        redirect: 'follow',
+      });
+      clearTimeout(timeout);
+
+      // Passthrough response headers (filtered)
+      const passthroughHeaders = { ...CORS_HEADERS_PASSTHROUGH };
+      const contentType = fetchRes.headers.get('content-type') || 'application/octet-stream';
+      passthroughHeaders['Content-Type'] = contentType;
+      passthroughHeaders['X-Proxy-Status'] = fetchRes.status;
+      passthroughHeaders['X-Proxy-Url'] = fetchRes.url;
+      passthroughHeaders['Cache-Control'] = 'public, max-age=60';
+
+      if (fetchRes.status >= 300 && fetchRes.status < 400) {
+        const location = fetchRes.headers.get('location');
+        if (location) {
+          passthroughHeaders['Location'] = location;
+          passthroughHeaders['X-Proxy-Redirect'] = location;
+        }
+      }
+
+      const body = Buffer.from(await fetchRes.arrayBuffer());
+      res.writeHead(fetchRes.status, passthroughHeaders);
+      res.end(body);
+    } catch (e) {
+      clearTimeout(timeout);
+      res.writeHead(502, CORS_HEADERS);
+      res.end(JSON.stringify({
+        error: 'Proxy fetch failed',
+        detail: String(e.message || e),
+        url: targetUrl.href,
+      }));
+    }
     return;
   }
 
