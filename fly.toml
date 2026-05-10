@@ -2,7 +2,7 @@ app = "sw-proxy-trafficlens"
 primary_region = "gru"
 
 [build]
-  image = "node:20-slim"
+  dockerfile = "Dockerfile"
 
 [env]
   PORT = "8080"
