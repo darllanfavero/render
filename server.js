@@ -238,6 +238,108 @@ const server = createServer(async (req, res) => {
     return;
   }
 
+  // ClaroTV+ endpoint: /api/claro?id=CHANNEL_ID&cookie=COOKIE_STRING
+  if (url.pathname === '/api/claro') {
+    const channelId = url.searchParams.get('id') || '86';
+    const cookie = url.searchParams.get('cookie') || '';
+    const channel = url.searchParams.get('channel') || 'IPHONEH';
+    const deviceId = url.searchParams.get('device') || 'DBE359E678F045A1A6F049A6A5974FC8';
+
+    if (!cookie) {
+      res.writeHead(400, CORS_HEADERS);
+      res.end(JSON.stringify({ error: 'Missing ?cookie= param (avs_cookie, sessionId, up from browser)' }));
+      return;
+    }
+
+    try {
+      // Step 1: Call ClaroTV+ API to get src + token
+      const apiRes = await fetch(
+        `https://www.clarotvmais.com.br/AVS/besc?action=GetCDN&channel=${channel}&type=LIVE&asJson=Y&skipInfSpan=Y&accountDeviceId=${deviceId}&isDownload=N&isTimeshift=N&id=${channelId}`,
+        {
+          headers: {
+            'User-Agent': USER_AGENT,
+            'Accept': 'application/json, text/html, */*',
+            'Accept-Language': 'pt-BR,pt;q=0.9',
+            'Cookie': cookie,
+          },
+          redirect: 'follow',
+        }
+      );
+
+      const apiData = JSON.parse(await apiRes.text());
+
+      if (apiData.resultCode !== 'OK') {
+        res.writeHead(402, CORS_HEADERS);
+        res.end(JSON.stringify({ error: 'Claro API failed', detail: apiData }));
+        return;
+      }
+
+      const { src, token, vmxToken } = apiData.resultObj;
+
+      // Step 2: Fetch getcdn to get signed URL (Location header with qsig)
+      const encodedToken = encodeURIComponent(token);
+      const cdnUrl = `${src}?token=${encodedToken}&response=200&bk-ml=1&diversityfailover=1`;
+
+      const cdnRes = await fetch(cdnUrl, {
+        headers: {
+          'User-Agent': USER_AGENT,
+          'Accept': '*/*',
+          'Accept-Language': 'pt-BR,pt;q=0.9',
+        },
+        redirect: 'manual',
+      });
+
+      const signedUrl = cdnRes.headers.get('location') || '';
+
+      // Step 3: If we got a signed URL, try fetching the actual content via it
+      let contentBody = null;
+      let contentStatus = null;
+      let contentType = null;
+
+      if (signedUrl) {
+        const contentRes = await fetch(signedUrl, {
+          headers: {
+            'User-Agent': USER_AGENT,
+            'Accept': '*/*',
+            'Accept-Language': 'pt-BR,pt;q=0.9',
+          },
+          redirect: 'follow',
+        });
+        contentStatus = contentRes.status;
+        contentType = contentRes.headers.get('content-type') || '';
+        contentBody = Buffer.from(await contentRes.arrayBuffer());
+      }
+
+      if (contentBody && contentStatus === 200) {
+        res.writeHead(200, {
+          ...CORS_HEADERS_PASSTHROUGH,
+          'Content-Type': contentType || 'application/octet-stream',
+          'X-Src': src,
+          'X-Token': 'provided',
+          'X-Signed-Url': signedUrl.substring(0, 200),
+          'X-Proxy-Geo': 'BR',
+          'Cache-Control': 'public, max-age=2',
+        });
+        res.end(contentBody);
+      } else {
+        res.writeHead(200, CORS_HEADERS);
+        res.end(JSON.stringify({
+          src,
+          token,
+          vmxToken,
+          signedUrl,
+          contentStatus,
+          channelId,
+          note: 'Use signedUrl with /api/proxy?url=... to fetch content',
+        }));
+      }
+    } catch (e) {
+      res.writeHead(502, CORS_HEADERS);
+      res.end(JSON.stringify({ error: 'Claro proxy failed', detail: String(e.message || e) }));
+    }
+    return;
+  }
+
   res.writeHead(404, CORS_HEADERS);
   res.end(JSON.stringify({ error: 'Not found' }));
 });
